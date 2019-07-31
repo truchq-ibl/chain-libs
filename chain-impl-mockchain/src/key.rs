@@ -288,10 +288,3 @@ impl FromStr for Hash {
         Ok(Hash(crypto::Blake2b256::from_str(s)?))
     }
 }
-
-#[cfg(test)]
-pub mod test {
-    use super::*;
-    use quickcheck::{Arbitrary, Gen};
-
-}

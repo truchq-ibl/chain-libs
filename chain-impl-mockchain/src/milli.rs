@@ -62,7 +62,7 @@ impl fmt::Display for Milli {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use quickcheck::{Arbitrary, Gen, TestResult};
+    use quickcheck::TestResult;
 
     fn assert_from_str(input: &str, expected_milli: u64) {
         let expected = Milli::from_millis(expected_milli);
