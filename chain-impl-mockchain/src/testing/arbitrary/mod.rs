@@ -5,8 +5,7 @@ pub mod transaction;
 pub mod update_proposal;
 pub mod utils;
 
-use crate::transaction::Output;
-use crate::value::Value;
+use crate::{fee::LinearFee, key::Hash, milli::Milli, transaction::Output, value::Value};
 use chain_addr::Address;
 use quickcheck::{Arbitrary, Gen};
 
@@ -61,6 +60,28 @@ impl Arbitrary for Output<Address> {
         Output {
             address: Arbitrary::arbitrary(g),
             value: Arbitrary::arbitrary(g),
+        }
+    }
+}
+
+impl Arbitrary for Milli {
+    fn arbitrary<G: Gen>(g: &mut G) -> Self {
+        Milli::from_millis(u64::arbitrary(g))
+    }
+}
+
+impl Arbitrary for Hash {
+    fn arbitrary<G: Gen>(g: &mut G) -> Self {
+        Hash(Arbitrary::arbitrary(g))
+    }
+}
+
+impl Arbitrary for LinearFee {
+    fn arbitrary<G: Gen>(g: &mut G) -> Self {
+        Self {
+            constant: Arbitrary::arbitrary(g),
+            coefficient: Arbitrary::arbitrary(g),
+            certificate: Arbitrary::arbitrary(g),
         }
     }
 }

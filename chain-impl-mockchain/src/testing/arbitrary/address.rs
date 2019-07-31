@@ -1,6 +1,7 @@
 use crate::testing::{address::AddressData, arbitrary::kind_type::KindTypeWithoutMultisig};
 use chain_addr::Discrimination;
-use quickcheck::{Arbitrary, Gen};
+
+use crate::testing::quickcheck::{Arbitrary, Gen};
 use std::iter;
 
 #[derive(Clone, Debug)]

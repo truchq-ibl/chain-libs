@@ -210,7 +210,7 @@ impl<T: Clone, A: VerificationAlgorithm> Clone for Signed<T, A> {
 
 /// Hash that is used as an address of the various components.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Hash(crypto::Blake2b256);
+pub struct Hash(pub(crate) crypto::Blake2b256);
 impl Hash {
     pub fn hash_bytes(bytes: &[u8]) -> Self {
         Hash(crypto::Blake2b256::new(bytes))
@@ -293,11 +293,5 @@ impl FromStr for Hash {
 pub mod test {
     use super::*;
     use quickcheck::{Arbitrary, Gen};
-
-    impl Arbitrary for Hash {
-        fn arbitrary<G: Gen>(g: &mut G) -> Self {
-            Hash(Arbitrary::arbitrary(g))
-        }
-    }
 
 }

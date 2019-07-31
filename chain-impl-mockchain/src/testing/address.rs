@@ -1,3 +1,4 @@
+use crate::testing::quickcheck::RngCore;
 use crate::{
     account::SpendingCounter,
     key::EitherEd25519SecretKey,
@@ -10,8 +11,6 @@ use chain_crypto::{
     bech32::Bech32, testing::TestCryptoGen, AsymmetricKey, Ed25519, Ed25519Extended, KeyPair,
     PublicKey,
 };
-
-use crate::quickcheck::RngCore;
 use std::fmt::{self, Debug};
 
 ///
@@ -53,7 +52,6 @@ impl AddressData {
             spending_counter,
         }
     }
-
 
     pub fn from_discrimination_and_kind_type(
         discrimination: Discrimination,
@@ -122,6 +120,13 @@ impl AddressData {
         }
     }
 
+    pub fn delegation_key(&self) -> PublicKey<Ed25519> {
+        match self.kind() {
+            Kind::Group(_, delegation_key) => delegation_key,
+            _ => panic!("cannto get delegation key from non group addres kind"),
+        }
+    }
+
     pub fn private_key(&self) -> EitherEd25519SecretKey {
         self.private_key.clone()
     }
@@ -134,16 +139,12 @@ impl AddressData {
         self.address.discrimination().clone()
     }
 
-    pub fn address_as_string(&self) -> String {
+    pub fn to_bech32_str(&self) -> String {
         let prefix = match self.discrimination() {
             Discrimination::Production => "ta",
             Discrimination::Test => "ca",
         };
         AddressReadable::from_address(prefix, &self.address).to_string()
-    }
-
-    pub fn public_key_as_string(&self) -> String {
-        self.public_key().to_bech32_str()
     }
 
     pub fn generate_key_pair<A: AsymmetricKey>() -> KeyPair<A> {

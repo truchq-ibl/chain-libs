@@ -123,10 +123,4 @@ mod tests {
             TestResult::passed()
         }
     }
-
-    impl Arbitrary for Milli {
-        fn arbitrary<G: Gen>(g: &mut G) -> Self {
-            Milli::from_millis(u64::arbitrary(g))
-        }
-    }
 }
