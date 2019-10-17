@@ -28,6 +28,11 @@ impl TransactionCertBuilder {
         }
     }
 
+    pub fn with_input(&mut self, input: Input) -> &mut Self {
+        self.inputs.push(input);
+        self
+    }
+
     pub fn with_certificate(&mut self, cert: Certificate) -> &mut Self {
         self.certificate = Some(cert);
         self
