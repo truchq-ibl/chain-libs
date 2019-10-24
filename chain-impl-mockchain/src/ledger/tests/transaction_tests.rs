@@ -4,7 +4,7 @@ use crate::fee::FeeAlgorithm;
 use crate::{
     accounting::account::LedgerError::NonExistent,
     fragment::Fragment,
-    ledger::{check::TxVerifyError, Entry, Error::{TransactionMalformed,UtxoError, Account, AccountInvalidSignature}, Ledger},
+    ledger::{check::TxVerifyError, Error::{TransactionMalformed,UtxoError, Account}, Ledger},
     testing::{
         arbitrary::{
             AccountStatesVerifier, ArbitraryValidTransactionData, NonZeroValue, UtxoVerifier,

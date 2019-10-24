@@ -5,7 +5,6 @@ use crate::{
         StakeDelegation,OwnerStakeDelegation
     },
     key::EitherEd25519SecretKey,
-    legacy::UtxoDeclaration,
     testing::data::AddressData,
     transaction::AccountIdentifier,
 };
