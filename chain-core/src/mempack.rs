@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::fmt;
+use std::num::{NonZeroU32, NonZeroU64};
 
 /// A local memory buffer to serialize data to
 pub struct WriteBuf(Vec<u8>);
@@ -179,12 +180,22 @@ impl<'a> ReadBuf<'a> {
         Ok(u32::from_be_bytes(buf))
     }
 
+    pub fn get_nz_u32(&mut self) -> Result<NonZeroU32, ReadError> {
+        let v = self.get_u32()?;
+        NonZeroU32::new(v).ok_or(ReadError::StructureInvalid("received zero u32".to_string()))
+    }
+
     /// Return the next u64 from the buffer
     pub fn get_u64(&mut self) -> Result<u64, ReadError> {
         const SIZE: usize = 8;
         let mut buf = [0u8; SIZE];
         buf.copy_from_slice(self.get_slice(SIZE)?);
         Ok(u64::from_be_bytes(buf))
+    }
+
+    pub fn get_nz_u64(&mut self) -> Result<NonZeroU64, ReadError> {
+        let v = self.get_u64()?;
+        NonZeroU64::new(v).ok_or(ReadError::StructureInvalid("received zero u64".to_string()))
     }
 
     /// Return the next u128 from the buffer

@@ -63,6 +63,7 @@ impl Settings {
 
     pub fn apply(&self, changes: &ConfigParams) -> Result<Self, Error> {
         let mut new_state = self.clone();
+        let mut per_certificate_fees = None;
 
         for param in changes.iter() {
             match param {
@@ -125,7 +126,16 @@ impl Settings {
                 ConfigParam::TreasuryParams(rp) => {
                     new_state.treasury_params = Some(rp.clone());
                 }
+                ConfigParam::PerCertificateFees(pcf) => {
+                    per_certificate_fees = Some(pcf);
+                }
             }
+        }
+
+        if let Some(pcf) = per_certificate_fees {
+            Arc::get_mut(&mut new_state.linear_fees)
+                .unwrap()
+                .per_certificate_fees(*pcf);
         }
 
         Ok(new_state)
@@ -163,6 +173,42 @@ impl Settings {
         debug_assert_eq!(self, &Settings::new().apply(&params).unwrap());
 
         params
+    }
+
+    pub fn to_reward_params(&self) -> rewards::Parameters {
+        let mut p = match self.reward_params {
+            None => rewards::Parameters::zero(),
+            Some(RewardParams::Halving {
+                constant,
+                ratio,
+                epoch_start,
+                epoch_rate,
+            }) => rewards::Parameters {
+                treasury_tax: rewards::TaxType::zero(),
+                initial_value: constant,
+                compounding_ratio: ratio,
+                compounding_type: rewards::CompoundingType::Halvening,
+                epoch_start,
+                epoch_rate,
+            },
+            Some(RewardParams::Linear {
+                constant,
+                ratio,
+                epoch_start,
+                epoch_rate,
+            }) => rewards::Parameters {
+                treasury_tax: rewards::TaxType::zero(),
+                initial_value: constant,
+                compounding_ratio: ratio,
+                compounding_type: rewards::CompoundingType::Linear,
+                epoch_start,
+                epoch_rate,
+            },
+        };
+        p.treasury_tax = self
+            .treasury_params
+            .unwrap_or_else(|| rewards::TaxType::zero());
+        p
     }
 }
 

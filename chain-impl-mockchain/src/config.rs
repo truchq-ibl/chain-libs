@@ -1,8 +1,12 @@
+use crate::header::Epoch;
 use crate::leadership::bft::LeaderId;
 use crate::milli::Milli;
-use crate::rewards::TaxType;
+use crate::rewards::{Ratio, TaxType};
 use crate::value::Value;
-use crate::{block::ConsensusVersion, fee::LinearFee};
+use crate::{
+    block::ConsensusVersion,
+    fee::{LinearFee, PerCertificateFee},
+};
 use chain_addr::Discrimination;
 use chain_core::mempack::{ReadBuf, ReadError, Readable};
 use chain_core::packer::Codec;
@@ -10,6 +14,7 @@ use chain_core::property;
 use chain_crypto::PublicKey;
 use std::fmt::{self, Display, Formatter};
 use std::io::{self, Write};
+use std::num::{NonZeroU32, NonZeroU64};
 use strum_macros::{AsRefStr, EnumIter, EnumString};
 use typed_bytes::ByteBuilder;
 
@@ -69,12 +74,23 @@ pub enum ConfigParam {
     TreasuryParams(TaxType),
     RewardPot(Value),
     RewardParams(RewardParams),
+    PerCertificateFees(PerCertificateFee),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RewardParams {
-    Linear(u64, u64, u64),
-    Halving(u64, u64, u64),
+    Linear {
+        constant: u64,
+        ratio: Ratio,
+        epoch_start: Epoch,
+        epoch_rate: NonZeroU32,
+    },
+    Halving {
+        constant: u64,
+        ratio: Ratio,
+        epoch_start: Epoch,
+        epoch_rate: NonZeroU32,
+    },
 }
 
 // Discriminants can NEVER be 1024 or higher
@@ -116,6 +132,8 @@ pub enum Tag {
     RewardPot = 19,
     #[strum(to_string = "reward-params")]
     RewardParams = 20,
+    #[strum(to_string = "per-certificate-fees")]
+    PerCertificateFees = 21,
 }
 
 impl Tag {
@@ -139,6 +157,7 @@ impl Tag {
             18 => Some(Tag::TreasuryParams),
             19 => Some(Tag::RewardPot),
             20 => Some(Tag::RewardParams),
+            21 => Some(Tag::PerCertificateFees),
             _ => None,
         }
     }
@@ -167,6 +186,7 @@ impl<'a> From<&'a ConfigParam> for Tag {
             ConfigParam::TreasuryParams(_) => Tag::TreasuryParams,
             ConfigParam::RewardPot(_) => Tag::RewardPot,
             ConfigParam::RewardParams(_) => Tag::RewardParams,
+            ConfigParam::PerCertificateFees(_) => Tag::PerCertificateFees,
         }
     }
 }
@@ -222,6 +242,9 @@ impl Readable for ConfigParam {
             Tag::RewardParams => {
                 ConfigParamVariant::from_payload(bytes).map(ConfigParam::RewardParams)
             }
+            Tag::PerCertificateFees => {
+                ConfigParamVariant::from_payload(bytes).map(ConfigParam::PerCertificateFees)
+            }
         }
         .map_err(Into::into)
     }
@@ -251,6 +274,7 @@ impl property::Serialize for ConfigParam {
             ConfigParam::TreasuryParams(data) => data.to_payload(),
             ConfigParam::RewardPot(data) => data.to_payload(),
             ConfigParam::RewardParams(data) => data.to_payload(),
+            ConfigParam::PerCertificateFees(data) => data.to_payload(),
         };
         let taglen = TagLen::new(tag, bytes.len()).ok_or_else(|| {
             io::Error::new(
@@ -299,12 +323,30 @@ impl ConfigParamVariant for TaxType {
 impl ConfigParamVariant for RewardParams {
     fn to_payload(&self) -> Vec<u8> {
         let bb: ByteBuilder<RewardParams> = match self {
-            RewardParams::Linear(start, num, denom) => {
-                ByteBuilder::new().u8(1).u64(*start).u64(*num).u64(*denom)
-            }
-            RewardParams::Halving(start, num, denom) => {
-                ByteBuilder::new().u8(2).u64(*start).u64(*num).u64(*denom)
-            }
+            RewardParams::Linear {
+                constant,
+                ratio,
+                epoch_start,
+                epoch_rate,
+            } => ByteBuilder::new()
+                .u8(1)
+                .u64(*constant)
+                .u64(ratio.numerator)
+                .u64(ratio.denominator.get())
+                .u32(*epoch_start)
+                .u32(epoch_rate.get()),
+            RewardParams::Halving {
+                constant,
+                ratio,
+                epoch_start,
+                epoch_rate,
+            } => ByteBuilder::new()
+                .u8(2)
+                .u64(*constant)
+                .u64(ratio.numerator)
+                .u64(ratio.denominator.get())
+                .u32(*epoch_start)
+                .u32(epoch_rate.get()),
         };
         bb.finalize_as_vec()
     }
@@ -315,16 +357,36 @@ impl ConfigParamVariant for RewardParams {
             1 => {
                 let start = rb.get_u64()?;
                 let num = rb.get_u64()?;
-                let denom = rb.get_u64()?;
+                let denom = rb.get_nz_u64()?;
+                let estart = rb.get_u32()?;
+                let erate = rb.get_nz_u32()?;
                 rb.expect_end()?;
-                Ok(RewardParams::Linear(start, num, denom))
+                Ok(RewardParams::Linear {
+                    constant: start,
+                    ratio: Ratio {
+                        numerator: num,
+                        denominator: denom,
+                    },
+                    epoch_start: estart,
+                    epoch_rate: erate,
+                })
             }
             2 => {
                 let start = rb.get_u64()?;
                 let num = rb.get_u64()?;
-                let denom = rb.get_u64()?;
+                let denom = rb.get_nz_u64()?;
+                let estart = rb.get_u32()?;
+                let erate = rb.get_nz_u32()?;
                 rb.expect_end()?;
-                Ok(RewardParams::Halving(start, num, denom))
+                Ok(RewardParams::Halving {
+                    constant: start,
+                    ratio: Ratio {
+                        numerator: num,
+                        denominator: denom,
+                    },
+                    epoch_start: estart,
+                    epoch_rate: erate,
+                })
             }
             _ => Err(Error::InvalidTag),
         }
@@ -478,6 +540,43 @@ impl ConfigParamVariant for LinearFee {
             constant: u64::from_payload(&payload[0..8])?,
             coefficient: u64::from_payload(&payload[8..16])?,
             certificate: u64::from_payload(&payload[16..24])?,
+            per_certificate_fees: PerCertificateFee::default(),
+        })
+    }
+}
+
+impl ConfigParamVariant for PerCertificateFee {
+    fn to_payload(&self) -> Vec<u8> {
+        let mut v = self
+            .certificate_pool_registration
+            .map(|v| v.get())
+            .unwrap_or(0)
+            .to_payload();
+        v.extend(
+            self.certificate_stake_delegation
+                .map(|v| v.get())
+                .unwrap_or(0)
+                .to_payload(),
+        );
+        v.extend(
+            self.certificate_owner_stake_delegation
+                .map(|v| v.get())
+                .unwrap_or(0)
+                .to_payload(),
+        );
+        v
+    }
+
+    fn from_payload(payload: &[u8]) -> Result<Self, Error> {
+        if payload.len() != 3 * 8 {
+            return Err(Error::SizeInvalid);
+        }
+        Ok(PerCertificateFee {
+            certificate_pool_registration: NonZeroU64::new(u64::from_payload(&payload[0..8])?),
+            certificate_stake_delegation: NonZeroU64::new(u64::from_payload(&payload[8..16])?),
+            certificate_owner_stake_delegation: NonZeroU64::new(u64::from_payload(
+                &payload[16..24],
+            )?),
         })
     }
 }
@@ -520,6 +619,20 @@ mod test {
             assert_eq!(len, tag_len.get_len(), "Invalid len");
             TestResult::passed()
         }
+
+        fn linear_fee_to_payload_from_payload(fee: LinearFee) -> TestResult {
+            let payload = fee.to_payload();
+            let decoded = LinearFee::from_payload(&payload).unwrap();
+
+            TestResult::from_bool(fee == decoded)
+        }
+
+        fn per_certificate_fee_to_payload_from_payload(fee: PerCertificateFee) -> TestResult {
+            let payload = fee.to_payload();
+            let decoded = PerCertificateFee::from_payload(&payload).unwrap();
+
+            TestResult::from_bool(fee == decoded)
+        }
     }
 
     impl Arbitrary for Tag {
@@ -535,26 +648,38 @@ mod test {
         }
     }
 
+    impl Arbitrary for Ratio {
+        fn arbitrary<G: Gen>(g: &mut G) -> Self {
+            Ratio {
+                numerator: Arbitrary::arbitrary(g),
+                denominator: NonZeroU64::new(Arbitrary::arbitrary(g))
+                    .unwrap_or(NonZeroU64::new(1).unwrap()),
+            }
+        }
+    }
+
     impl Arbitrary for RewardParams {
         fn arbitrary<G: Gen>(g: &mut G) -> Self {
             match bool::arbitrary(g) {
-                false => RewardParams::Linear(
-                    Arbitrary::arbitrary(g),
-                    Arbitrary::arbitrary(g),
-                    Arbitrary::arbitrary(g),
-                ),
-                true => RewardParams::Halving(
-                    Arbitrary::arbitrary(g),
-                    Arbitrary::arbitrary(g),
-                    Arbitrary::arbitrary(g),
-                ),
+                false => RewardParams::Linear {
+                    constant: Arbitrary::arbitrary(g),
+                    ratio: Arbitrary::arbitrary(g),
+                    epoch_start: Arbitrary::arbitrary(g),
+                    epoch_rate: NonZeroU32::new(20).unwrap(),
+                },
+                true => RewardParams::Halving {
+                    constant: Arbitrary::arbitrary(g),
+                    ratio: Arbitrary::arbitrary(g),
+                    epoch_start: Arbitrary::arbitrary(g),
+                    epoch_rate: NonZeroU32::new(20).unwrap(),
+                },
             }
         }
     }
 
     impl Arbitrary for ConfigParam {
         fn arbitrary<G: Gen>(g: &mut G) -> Self {
-            match u8::arbitrary(g) % 15 {
+            match u8::arbitrary(g) % 16 {
                 0 => ConfigParam::Block0Date(Arbitrary::arbitrary(g)),
                 1 => ConfigParam::Discrimination(Arbitrary::arbitrary(g)),
                 2 => ConfigParam::ConsensusVersion(Arbitrary::arbitrary(g)),
@@ -570,6 +695,7 @@ mod test {
                 12 => ConfigParam::TreasuryAdd(Arbitrary::arbitrary(g)),
                 13 => ConfigParam::RewardPot(Arbitrary::arbitrary(g)),
                 14 => ConfigParam::RewardParams(Arbitrary::arbitrary(g)),
+                15 => ConfigParam::PerCertificateFees(Arbitrary::arbitrary(g)),
                 _ => unreachable!(),
             }
         }

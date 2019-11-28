@@ -1,16 +1,17 @@
 use crate::{
-    account::{AccountAlg,Ledger as AccountLedger},
+    account::Ledger as AccountLedger,
     block::{ConsensusVersion, HeaderId},
     config::ConfigParam,
     fee::LinearFee,
     fragment::{config::ConfigParams, Fragment, FragmentId},
+    header::BlockDate,
     leadership::bft::LeaderId,
     ledger::{Error, Ledger, LedgerParameters},
     milli::Milli,
+    testing::data::{AddressData, AddressDataValue},
     transaction::{Output, TxBuilder},
+    utxo::{Entry, Iter},
     value::Value,
-    utxo::{Entry,Iter},
-    testing::data::{AddressData,AddressDataValue}
 };
 use chain_addr::{Address, Discrimination};
 use chain_crypto::*;
@@ -112,9 +113,9 @@ pub struct LedgerBuilder {
     cfg_builder: ConfigBuilder,
     cfg_params: ConfigParams,
     fragments: Vec<Fragment>,
+    certs: Vec<Fragment>,
     faucets: Vec<AddressDataValue>,
     utxo_declaration: Vec<UtxoDeclaration>,
-    seed: u64,
 }
 
 pub type UtxoDeclaration = Output<Address>;
@@ -127,7 +128,7 @@ impl UtxoDb {
     pub fn find_fragments(&self, decl: &UtxoDeclaration) -> Vec<(FragmentId, u8)> {
         self.db
             .iter()
-            .filter_map(|(k,v)| if v == decl { Some(k.clone()) } else { None })
+            .filter_map(|(k, v)| if v == decl { Some(k.clone()) } else { None })
             .collect()
     }
 
@@ -141,26 +142,13 @@ impl LedgerBuilder {
         cfg_builder.normalize();
         let cfg_params = cfg_builder.clone().build();
         Self {
-            seed: cfg_builder.seed,
             cfg_builder,
             cfg_params,
             faucets: Vec::new(),
             utxo_declaration: Vec::new(),
             fragments: Vec::new(),
+            certs: Vec::new(),
         }
-    }
-
-    fn randbuf(&mut self, buf: &mut [u8]) {
-        for b in buf.iter_mut() {
-            *b = self.seed as u8;
-            self.seed = self.seed.wrapping_mul(2862933555777941757u64).wrapping_add(3037000493);
-        }
-    }
-
-    fn account_secret_key(&mut self) -> SecretKey<AccountAlg> {
-        let mut sk = [0u8;32];
-        self.randbuf(&mut sk);
-        SecretKey::from_binary(&sk).unwrap()
     }
 
     pub fn fragment(mut self, f: Fragment) -> Self {
@@ -170,6 +158,11 @@ impl LedgerBuilder {
 
     pub fn fragments(mut self, f: &[Fragment]) -> Self {
         self.fragments.extend_from_slice(f);
+        self
+    }
+
+    pub fn certs(mut self, f: &[Fragment]) -> Self {
+        self.certs.extend_from_slice(f);
         self
     }
 
@@ -197,7 +190,10 @@ impl LedgerBuilder {
     }
 
     pub fn faucet_value(mut self, value: Value) -> Self {
-        self.faucets.push(AddressDataValue::account(self.cfg_builder.discrimination,value));
+        self.faucets.push(AddressDataValue::account(
+            self.cfg_builder.discrimination,
+            value,
+        ));
         self
     }
 
@@ -229,7 +225,7 @@ impl LedgerBuilder {
 
     pub fn utxos(mut self, decls: &[UtxoDeclaration]) -> Self {
         self.utxo_declaration.extend_from_slice(decls);
-        self 
+        self
     }
 
     pub fn build(mut self) -> Result<TestLedger, Error> {
@@ -270,19 +266,25 @@ impl LedgerBuilder {
         let mut fragments = Vec::new();
         fragments.push(Fragment::Initial(self.cfg_params));
         fragments.extend_from_slice(&self.fragments);
+        fragments.extend_from_slice(&self.certs);
 
         let faucets = self.faucets.clone();
         Ledger::new(block0_hash, &fragments).map(|ledger| {
             let parameters = ledger.get_ledger_parameters();
             TestLedger {
-                cfg, faucets, ledger, block0_hash, utxodb, parameters,
+                cfg,
+                faucets,
+                ledger,
+                block0_hash,
+                utxodb,
+                parameters,
             }
         })
     }
 }
 
 pub struct TestLedger {
-    pub block0_hash: HeaderId, 
+    pub block0_hash: HeaderId,
     pub cfg: ConfigParams,
     pub faucets: Vec<AddressDataValue>,
     pub ledger: Ledger,
@@ -291,13 +293,15 @@ pub struct TestLedger {
 }
 
 impl TestLedger {
-    pub fn apply_transaction(&mut self, fragment: Fragment)
-        -> Result<(), Error>
-    {
+    pub fn apply_transaction(&mut self, fragment: Fragment) -> Result<(), Error> {
         let fragment_id = fragment.hash();
         match fragment {
             Fragment::Transaction(tx) => {
-                match self.ledger.clone().apply_transaction(&fragment_id, &tx.as_slice(), &self.parameters) {
+                match self.ledger.clone().apply_transaction(
+                    &fragment_id,
+                    &tx.as_slice(),
+                    &self.parameters,
+                ) {
                     Err(err) => Err(err),
                     Ok((ledger, _)) => {
                         // TODO more bookkeeping for accounts and utxos
@@ -306,10 +310,16 @@ impl TestLedger {
                     }
                 }
             }
-            _ => {
-                panic!("test ledger apply transaction only supports transaction type for now")
-            }
+            _ => panic!("test ledger apply transaction only supports transaction type for now"),
         }
+    }
+
+    pub fn apply_fragment(&mut self, fragment: &Fragment, date: BlockDate) -> Result<(), Error> {
+        self.ledger = self
+            .ledger
+            .clone()
+            .apply_fragment(&self.parameters, fragment, date)?;
+        Ok(())
     }
 
     pub fn total_funds(&self) -> Value {
@@ -320,9 +330,11 @@ impl TestLedger {
 
     pub fn find_utxo_for_address<'a>(
         &'a self,
-        address_data: &AddressData
+        address_data: &AddressData,
     ) -> Option<Entry<'a, Address>> {
-        let entry = self.utxos().find(|x| x.output.address == address_data.address);
+        let entry = self
+            .utxos()
+            .find(|x| x.output.address == address_data.address);
         entry
     }
 
@@ -336,5 +348,11 @@ impl TestLedger {
 
     pub fn fee(&self) -> LinearFee {
         self.parameters.fees
+    }
+}
+
+impl Into<Ledger> for TestLedger {
+    fn into(self) -> Ledger {
+        self.ledger
     }
 }

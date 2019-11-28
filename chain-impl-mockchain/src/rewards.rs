@@ -1,11 +1,11 @@
 use crate::block::Epoch;
 use crate::value::{Value, ValueError};
 use chain_core::mempack::{ReadBuf, ReadError};
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 use typed_bytes::ByteBuilder;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReducingType {
+pub enum CompoundingType {
     Linear,
     Halvening,
 }
@@ -14,6 +14,15 @@ pub enum ReducingType {
 pub struct Ratio {
     pub numerator: u64,
     pub denominator: NonZeroU64,
+}
+
+impl Ratio {
+    pub fn zero() -> Self {
+        Ratio {
+            numerator: 0,
+            denominator: NonZeroU64::new(1).unwrap(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,10 +39,7 @@ impl TaxType {
     pub fn zero() -> Self {
         TaxType {
             fixed: Value(0),
-            ratio: Ratio {
-                numerator: 0,
-                denominator: NonZeroU64::new(1).unwrap(),
-            },
+            ratio: Ratio::zero(),
             max_limit: None,
         }
     }
@@ -83,20 +89,34 @@ impl TaxType {
 pub struct Parameters {
     /// Tax cut of the treasury which is applied straight after the reward pot
     /// is fully known
-    treasury_tax: TaxType,
+    pub(crate) treasury_tax: TaxType,
 
-    //pool_owners_tax: TaxType,
     /// This is an initial_value for the linear or halvening function.
     /// In the case of the linear function it is the value that is going to be calculated
     /// from the contribution.
-    rewards_initial_value: u64,
+    pub(crate) initial_value: u64,
     /// This is the ratio used by either the linear or the halvening function.
     /// The semantic and result of this is deeply linked to either.
-    rewards_reducement_ratio: Ratio,
-    /// The type of reduction
-    reducing_type: ReducingType,
+    pub(crate) compounding_ratio: Ratio,
+    /// The type of compounding
+    pub(crate) compounding_type: CompoundingType,
     /// Number of epoch between reduction phase, cannot be 0
-    reducing_epoch_rate: u64,
+    pub(crate) epoch_rate: NonZeroU32,
+    /// When to start
+    pub(crate) epoch_start: Epoch,
+}
+
+impl Parameters {
+    pub fn zero() -> Self {
+        Parameters {
+            treasury_tax: TaxType::zero(),
+            initial_value: 0,
+            compounding_ratio: Ratio::zero(),
+            compounding_type: CompoundingType::Linear,
+            epoch_rate: NonZeroU32::new(u32::max_value()).unwrap(),
+            epoch_start: 0,
+        }
+    }
 }
 
 /// A value distributed between tax and remaining
@@ -111,28 +131,33 @@ pub struct TaxDistribution {
 /// Note that the contribution in the system is still bounded by the remaining
 /// rewards pot, which is not taken in considering for this calculation.
 pub fn rewards_contribution_calculation(epoch: Epoch, params: &Parameters) -> Value {
-    assert!(params.reducing_epoch_rate != 0);
-    let zone = epoch as u64 / params.reducing_epoch_rate;
-    match params.reducing_type {
-        ReducingType::Linear => {
+    assert!(params.epoch_rate.get() != 0);
+
+    if epoch < params.epoch_start {
+        return Value::zero();
+    }
+
+    let zone = ((epoch - params.epoch_start) / params.epoch_rate.get()) as u64;
+    match params.compounding_type {
+        CompoundingType::Linear => {
             // C - rratio * (#epoch / erate)
-            let rr = &params.rewards_reducement_ratio;
+            let rr = &params.compounding_ratio;
             let reduce_by = (rr.numerator * zone) / rr.denominator.get();
-            if params.rewards_initial_value >= reduce_by {
-                Value(params.rewards_initial_value - reduce_by)
+            if params.initial_value >= reduce_by {
+                Value(params.initial_value - reduce_by)
             } else {
-                Value(params.rewards_initial_value)
+                Value(params.initial_value)
             }
         }
-        ReducingType::Halvening => {
+        CompoundingType::Halvening => {
             // mathematical formula is : C * rratio ^ (#epoch / erate)
             // although we perform it as a for loop, with the rationale
             // that it allow for integer computation and that the reduce_epoch_rate
             // should prevent growth to large amount of zones
-            let rr = &params.rewards_reducement_ratio;
+            let rr = &params.compounding_ratio;
             const SCALE: u128 = 10 ^ 18;
 
-            let mut acc = params.rewards_initial_value as u128 * SCALE;
+            let mut acc = params.initial_value as u128 * SCALE;
             for _ in 0..zone {
                 acc *= rr.numerator as u128;
                 acc /= rr.denominator.get() as u128;
