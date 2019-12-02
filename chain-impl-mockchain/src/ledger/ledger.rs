@@ -623,7 +623,7 @@ impl Ledger {
     {
         check::valid_transaction_ios_number(tx)?;
         let fee = calculate_fee(tx, dyn_params);
-        tx.into_owned().verify_strictly_balanced(fee)?;
+        tx.verify_strictly_balanced(fee)?;
         self = self.apply_tx_inputs(tx)?;
         self = self.apply_tx_outputs(*fragment_id, tx.outputs())?;
         self = self.apply_tx_fee(fee)?;
@@ -749,7 +749,7 @@ impl Ledger {
             }
         };
 
-        let fee = dyn_params.fees.calculate_tx(&tx.into_owned());
+        let fee = dyn_params.fees.calculate_tx(tx);
         if fee != value {
             return Err(Error::NotBalanced {
                 inputs: value,
@@ -1006,7 +1006,7 @@ impl Ledger {
                 };
 
                 let data_to_verify =
-                    WitnessUtxoData::new(&self.static_params.block0_initial_hash, sign_data_hash);
+                    WitnessUtxoData::new(&self.static_params.block0_initial_hash, sign_data_hash, true);
                 let verified = signature.verify(&xpub, &data_to_verify);
                 if verified == chain_crypto::Verification::Failed {
                     return Err(Error::OldUtxoInvalidSignature {
@@ -1030,7 +1030,7 @@ impl Ledger {
                 }
 
                 let data_to_verify =
-                    WitnessUtxoData::new(&self.static_params.block0_initial_hash, sign_data_hash);
+                    WitnessUtxoData::new(&self.static_params.block0_initial_hash, sign_data_hash, false);
                 let verified = signature.verify(
                     &associated_output.address.public_key().unwrap(),
                     &data_to_verify,
@@ -1070,7 +1070,7 @@ fn calculate_fee<'a, Extra: Payload>(
     tx: &TransactionSlice<'a, Extra>,
     dyn_params: &LedgerParameters,
 ) -> Value {
-    dyn_params.fees.calculate_tx(&tx.into_owned())
+    dyn_params.fees.calculate_tx(tx)
 }
 
 pub enum MatchingIdentifierWitness<'a> {
