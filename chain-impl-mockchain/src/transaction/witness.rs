@@ -147,7 +147,7 @@ impl Witness {
         sign_data_hash: &TransactionSignDataHash,
         secret_key: &SecretKey<LegacyDaedalus>,
     ) -> Self {
-        let wud = WitnessUtxoData::new(block0, sign_data_hash);
+        let wud = WitnessUtxoData::new(block0, sign_data_hash, true);
         let pubkey =
             PublicKey::<Ed25519Bip32>::from_binary(secret_key.to_public().as_ref()).unwrap();
         let signature =
