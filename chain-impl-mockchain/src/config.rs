@@ -63,8 +63,7 @@ pub enum ConfigParam {
     SlotDuration(u8),
     EpochStabilityDepth(u32),
     ConsensusGenesisPraosActiveSlotsCoeff(Milli),
-    MaxNumberOfTransactionsPerBlock(u32),
-    BftSlotsRatio(Milli),
+    BlockContentMaxSize(u32),
     AddBftLeader(LeaderId),
     RemoveBftLeader(LeaderId),
     LinearFee(LinearFee),
@@ -75,6 +74,10 @@ pub enum ConfigParam {
     RewardPot(Value),
     RewardParams(RewardParams),
     PerCertificateFees(PerCertificateFee),
+    FeesInTreasury(bool),
+    RewardLimitNone,
+    RewardLimitByAbsoluteStake(Ratio),
+    PoolRewardParticipationCapping((NonZeroU32, NonZeroU32)),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -110,10 +113,8 @@ pub enum Tag {
     EpochStabilityDepth = 6,
     #[strum(to_string = "genesis-praos-param-f")]
     ConsensusGenesisPraosActiveSlotsCoeff = 8,
-    #[strum(to_string = "max-number-of-transactions-per-block")]
-    MaxNumberOfTransactionsPerBlock = 9,
-    #[strum(to_string = "bft-slots-ratio")]
-    BftSlotsRatio = 10,
+    #[strum(to_string = "block-content-max-size")]
+    BlockContentMaxSize = 9,
     #[strum(to_string = "add-bft-leader")]
     AddBftLeader = 11,
     #[strum(to_string = "remove-bft-leader")]
@@ -134,6 +135,14 @@ pub enum Tag {
     RewardParams = 20,
     #[strum(to_string = "per-certificate-fees")]
     PerCertificateFees = 21,
+    #[strum(to_string = "fees-in-treasury")]
+    FeesInTreasury = 22,
+    #[strum(to_string = "reward-limit-none")]
+    RewardLimitNone = 23,
+    #[strum(to_string = "reward-limit-by-absolute-stake")]
+    RewardLimitByAbsoluteStake = 24,
+    #[strum(to_string = "pool-reward-participation-capping")]
+    PoolRewardParticipationCapping = 25,
 }
 
 impl Tag {
@@ -146,8 +155,7 @@ impl Tag {
             5 => Some(Tag::SlotDuration),
             6 => Some(Tag::EpochStabilityDepth),
             8 => Some(Tag::ConsensusGenesisPraosActiveSlotsCoeff),
-            9 => Some(Tag::MaxNumberOfTransactionsPerBlock),
-            10 => Some(Tag::BftSlotsRatio),
+            9 => Some(Tag::BlockContentMaxSize),
             11 => Some(Tag::AddBftLeader),
             12 => Some(Tag::RemoveBftLeader),
             14 => Some(Tag::LinearFee),
@@ -158,6 +166,10 @@ impl Tag {
             19 => Some(Tag::RewardPot),
             20 => Some(Tag::RewardParams),
             21 => Some(Tag::PerCertificateFees),
+            22 => Some(Tag::FeesInTreasury),
+            23 => Some(Tag::RewardLimitNone),
+            24 => Some(Tag::RewardLimitByAbsoluteStake),
+            25 => Some(Tag::PoolRewardParticipationCapping),
             _ => None,
         }
     }
@@ -175,8 +187,7 @@ impl<'a> From<&'a ConfigParam> for Tag {
             ConfigParam::ConsensusGenesisPraosActiveSlotsCoeff(_) => {
                 Tag::ConsensusGenesisPraosActiveSlotsCoeff
             }
-            ConfigParam::MaxNumberOfTransactionsPerBlock(_) => Tag::MaxNumberOfTransactionsPerBlock,
-            ConfigParam::BftSlotsRatio(_) => Tag::BftSlotsRatio,
+            ConfigParam::BlockContentMaxSize(_) => Tag::BlockContentMaxSize,
             ConfigParam::AddBftLeader(_) => Tag::AddBftLeader,
             ConfigParam::RemoveBftLeader(_) => Tag::RemoveBftLeader,
             ConfigParam::LinearFee(_) => Tag::LinearFee,
@@ -187,6 +198,10 @@ impl<'a> From<&'a ConfigParam> for Tag {
             ConfigParam::RewardPot(_) => Tag::RewardPot,
             ConfigParam::RewardParams(_) => Tag::RewardParams,
             ConfigParam::PerCertificateFees(_) => Tag::PerCertificateFees,
+            ConfigParam::FeesInTreasury(_) => Tag::FeesInTreasury,
+            ConfigParam::RewardLimitNone => Tag::RewardLimitNone,
+            ConfigParam::RewardLimitByAbsoluteStake(_) => Tag::RewardLimitByAbsoluteStake,
+            ConfigParam::PoolRewardParticipationCapping(..) => Tag::PoolRewardParticipationCapping,
         }
     }
 }
@@ -214,10 +229,8 @@ impl Readable for ConfigParam {
             }
             Tag::ConsensusGenesisPraosActiveSlotsCoeff => ConfigParamVariant::from_payload(bytes)
                 .map(ConfigParam::ConsensusGenesisPraosActiveSlotsCoeff),
-            Tag::MaxNumberOfTransactionsPerBlock => ConfigParamVariant::from_payload(bytes)
-                .map(ConfigParam::MaxNumberOfTransactionsPerBlock),
-            Tag::BftSlotsRatio => {
-                ConfigParamVariant::from_payload(bytes).map(ConfigParam::BftSlotsRatio)
+            Tag::BlockContentMaxSize => {
+                ConfigParamVariant::from_payload(bytes).map(ConfigParam::BlockContentMaxSize)
             }
             Tag::AddBftLeader => {
                 ConfigParamVariant::from_payload(bytes).map(ConfigParam::AddBftLeader)
@@ -245,6 +258,21 @@ impl Readable for ConfigParam {
             Tag::PerCertificateFees => {
                 ConfigParamVariant::from_payload(bytes).map(ConfigParam::PerCertificateFees)
             }
+            Tag::FeesInTreasury => {
+                ConfigParamVariant::from_payload(bytes).map(ConfigParam::FeesInTreasury)
+            }
+            Tag::RewardLimitNone => {
+                if bytes.len() != 0 {
+                    Err(Error::SizeInvalid)
+                } else {
+                    Ok(ConfigParam::RewardLimitNone)
+                }
+            }
+            Tag::RewardLimitByAbsoluteStake => {
+                ConfigParamVariant::from_payload(bytes).map(ConfigParam::RewardLimitByAbsoluteStake)
+            }
+            Tag::PoolRewardParticipationCapping => ConfigParamVariant::from_payload(bytes)
+                .map(ConfigParam::PoolRewardParticipationCapping),
         }
         .map_err(Into::into)
     }
@@ -263,8 +291,7 @@ impl property::Serialize for ConfigParam {
             ConfigParam::SlotDuration(data) => data.to_payload(),
             ConfigParam::EpochStabilityDepth(data) => data.to_payload(),
             ConfigParam::ConsensusGenesisPraosActiveSlotsCoeff(data) => data.to_payload(),
-            ConfigParam::MaxNumberOfTransactionsPerBlock(data) => data.to_payload(),
-            ConfigParam::BftSlotsRatio(data) => data.to_payload(),
+            ConfigParam::BlockContentMaxSize(data) => data.to_payload(),
             ConfigParam::AddBftLeader(data) => data.to_payload(),
             ConfigParam::RemoveBftLeader(data) => data.to_payload(),
             ConfigParam::LinearFee(data) => data.to_payload(),
@@ -275,6 +302,10 @@ impl property::Serialize for ConfigParam {
             ConfigParam::RewardPot(data) => data.to_payload(),
             ConfigParam::RewardParams(data) => data.to_payload(),
             ConfigParam::PerCertificateFees(data) => data.to_payload(),
+            ConfigParam::FeesInTreasury(data) => data.to_payload(),
+            ConfigParam::RewardLimitNone => Vec::with_capacity(0),
+            ConfigParam::RewardLimitByAbsoluteStake(data) => data.to_payload(),
+            ConfigParam::PoolRewardParticipationCapping(data) => data.to_payload(),
         };
         let taglen = TagLen::new(tag, bytes.len()).ok_or_else(|| {
             io::Error::new(
@@ -320,6 +351,25 @@ impl ConfigParamVariant for TaxType {
     }
 }
 
+impl ConfigParamVariant for Ratio {
+    fn to_payload(&self) -> Vec<u8> {
+        let bb: ByteBuilder<Ratio> = ByteBuilder::new();
+        bb.u64(self.numerator)
+            .u64(self.denominator.get())
+            .finalize_as_vec()
+    }
+
+    fn from_payload(payload: &[u8]) -> Result<Self, Error> {
+        let mut rb = ReadBuf::from(payload);
+        let num = rb.get_u64()?;
+        let denom = rb.get_nz_u64()?;
+        rb.expect_end()?;
+        Ok(Ratio {
+            numerator: num,
+            denominator: denom,
+        })
+    }
+}
 impl ConfigParamVariant for RewardParams {
     fn to_payload(&self) -> Vec<u8> {
         let bb: ByteBuilder<RewardParams> = match self {
@@ -514,6 +564,20 @@ impl ConfigParamVariant for u32 {
     }
 }
 
+impl ConfigParamVariant for (NonZeroU32, NonZeroU32) {
+    fn to_payload(&self) -> Vec<u8> {
+        let bb: ByteBuilder<()> = ByteBuilder::new();
+        bb.u32(self.0.get()).u32(self.1.get()).finalize_as_vec()
+    }
+
+    fn from_payload(payload: &[u8]) -> Result<Self, Error> {
+        let mut rb = ReadBuf::from(payload);
+        let x = rb.get_nz_u32()?;
+        let y = rb.get_nz_u32()?;
+        Ok((x, y))
+    }
+}
+
 impl ConfigParamVariant for Milli {
     fn to_payload(&self) -> Vec<u8> {
         self.to_millis().to_payload()
@@ -686,16 +750,16 @@ mod test {
                 3 => ConfigParam::SlotsPerEpoch(Arbitrary::arbitrary(g)),
                 4 => ConfigParam::SlotDuration(Arbitrary::arbitrary(g)),
                 5 => ConfigParam::ConsensusGenesisPraosActiveSlotsCoeff(Arbitrary::arbitrary(g)),
-                6 => ConfigParam::MaxNumberOfTransactionsPerBlock(Arbitrary::arbitrary(g)),
-                7 => ConfigParam::BftSlotsRatio(Arbitrary::arbitrary(g)),
-                8 => ConfigParam::AddBftLeader(Arbitrary::arbitrary(g)),
-                9 => ConfigParam::RemoveBftLeader(Arbitrary::arbitrary(g)),
-                10 => ConfigParam::LinearFee(Arbitrary::arbitrary(g)),
-                11 => ConfigParam::ProposalExpiration(Arbitrary::arbitrary(g)),
-                12 => ConfigParam::TreasuryAdd(Arbitrary::arbitrary(g)),
-                13 => ConfigParam::RewardPot(Arbitrary::arbitrary(g)),
-                14 => ConfigParam::RewardParams(Arbitrary::arbitrary(g)),
-                15 => ConfigParam::PerCertificateFees(Arbitrary::arbitrary(g)),
+                6 => ConfigParam::BlockContentMaxSize(Arbitrary::arbitrary(g)),
+                7 => ConfigParam::AddBftLeader(Arbitrary::arbitrary(g)),
+                8 => ConfigParam::RemoveBftLeader(Arbitrary::arbitrary(g)),
+                9 => ConfigParam::LinearFee(Arbitrary::arbitrary(g)),
+                10 => ConfigParam::ProposalExpiration(Arbitrary::arbitrary(g)),
+                11 => ConfigParam::TreasuryAdd(Arbitrary::arbitrary(g)),
+                12 => ConfigParam::RewardPot(Arbitrary::arbitrary(g)),
+                13 => ConfigParam::RewardParams(Arbitrary::arbitrary(g)),
+                14 => ConfigParam::PerCertificateFees(Arbitrary::arbitrary(g)),
+                15 => ConfigParam::FeesInTreasury(Arbitrary::arbitrary(g)),
                 _ => unreachable!(),
             }
         }

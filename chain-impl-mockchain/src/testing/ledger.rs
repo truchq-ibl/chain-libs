@@ -1,22 +1,32 @@
 use crate::{
     account::Ledger as AccountLedger,
-    block::{ConsensusVersion, HeaderId},
-    config::ConfigParam,
+    block::{Block, ConsensusVersion, HeaderId, LeadersParticipationRecord},
+    certificate::PoolId,
+    config::{ConfigParam, RewardParams},
+    date::BlockDate,
     fee::LinearFee,
     fragment::{config::ConfigParams, Fragment, FragmentId},
-    header::BlockDate,
-    leadership::bft::LeaderId,
-    ledger::{Error, Ledger, LedgerParameters},
+    header::ChainLength,
+    leadership::{bft::LeaderId, genesis::LeadershipData},
+    ledger::{Error, Ledger, LedgerParameters, RewardsInfoParameters},
     milli::Milli,
-    testing::data::{AddressData, AddressDataValue,Wallet},
+    rewards::{Ratio, TaxType},
+    stake::PoolsState,
+    testing::{
+        builders::GenesisPraosBlockBuilder,
+        data::{AddressData, AddressDataValue, StakePool, Wallet},
+    },
     transaction::{Output, TxBuilder},
     utxo::{Entry, Iter},
     value::Value,
-    stake::PoolsState
 };
 use chain_addr::{Address, Discrimination};
 use chain_crypto::*;
-use std::collections::HashMap;
+use chain_time::TimeEra;
+use std::{
+    collections::HashMap,
+    num::{NonZeroU32, NonZeroU64},
+};
 
 #[derive(Clone)]
 pub struct ConfigBuilder {
@@ -27,6 +37,10 @@ pub struct ConfigBuilder {
     linear_fee: Option<LinearFee>,
     leaders: Vec<LeaderId>,
     seed: u64,
+    rewards: Value,
+    treasury: Value,
+    treasury_params: TaxType,
+    reward_params: RewardParams,
 }
 
 impl ConfigBuilder {
@@ -39,7 +53,39 @@ impl ConfigBuilder {
             leaders: Vec::new(),
             linear_fee: None,
             seed,
+            rewards: Value(1_000_000),
+            reward_params: RewardParams::Linear {
+                constant: 100,
+                ratio: Ratio {
+                    numerator: 1,
+                    denominator: NonZeroU64::new(100).unwrap(),
+                },
+                epoch_start: 0,
+                epoch_rate: NonZeroU32::new(1).unwrap(),
+            },
+            treasury_params: TaxType::zero(),
+            treasury: Value(1_000),
         }
+    }
+
+    pub fn with_rewards(mut self, value: Value) -> Self {
+        self.rewards = value;
+        self
+    }
+
+    pub fn with_treasury(mut self, value: Value) -> Self {
+        self.treasury = value;
+        self
+    }
+
+    pub fn with_treasury_params(mut self, tax_type: TaxType) -> Self {
+        self.treasury_params = tax_type;
+        self
+    }
+
+    pub fn with_rewards_params(mut self, reward_params: RewardParams) -> Self {
+        self.reward_params = reward_params;
+        self
     }
 
     pub fn with_discrimination(mut self, discrimination: Discrimination) -> Self {
@@ -94,6 +140,11 @@ impl ConfigBuilder {
         for leader_id in self.leaders.iter().cloned() {
             ie.push(ConfigParam::AddBftLeader(leader_id));
         }
+
+        ie.push(ConfigParam::RewardPot(self.rewards.clone()));
+        ie.push(ConfigParam::TreasuryAdd(self.treasury.clone()));
+        ie.push(ConfigParam::TreasuryParams(self.treasury_params.clone()));
+        ie.push(ConfigParam::RewardParams(self.reward_params.clone()));
 
         if self.linear_fee.is_some() {
             ie.push(ConfigParam::LinearFee(self.linear_fee.clone().unwrap()));
@@ -221,7 +272,8 @@ impl LedgerBuilder {
     }
 
     pub fn faucets_wallets(mut self, faucets: Vec<&Wallet>) -> Self {
-        self.faucets.extend(faucets.iter().cloned().map(|x| x.as_account()));
+        self.faucets
+            .extend(faucets.iter().cloned().map(|x| x.as_account()));
         self
     }
 
@@ -329,6 +381,16 @@ impl TestLedger {
         Ok(())
     }
 
+    pub fn apply_block(&mut self, block: Block) -> Result<(), Error> {
+        let header_meta = block.header.to_content_eval_context();
+        self.ledger = self.ledger.clone().apply_block(
+            &self.ledger.get_ledger_parameters(),
+            &block.contents,
+            &header_meta,
+        )?;
+        Ok(())
+    }
+
     pub fn total_funds(&self) -> Value {
         let utxo_total = Value(self.ledger.utxos().map(|x| x.output.value.0).sum::<u64>());
         let accounts_total = self.ledger.accounts().get_total_value().unwrap();
@@ -357,9 +419,118 @@ impl TestLedger {
         self.parameters.fees
     }
 
-    pub fn delegation(&self) -> PoolsState{
+    pub fn chain_length(&self) -> ChainLength {
+        self.ledger.chain_length()
+    }
+
+    pub fn era(&self) -> &TimeEra {
+        self.ledger.era()
+    }
+
+    pub fn delegation(&self) -> PoolsState {
         self.ledger.delegation().clone()
-        
+    }
+
+    pub fn date(&self) -> BlockDate {
+        self.ledger.date()
+    }
+
+    // use it only for negative testing since it introduce bad state in ledger
+    pub fn set_date(&mut self, date: BlockDate) {
+        self.ledger.date = date;
+    }
+
+    pub fn leaders_log(&self) -> LeadersParticipationRecord {
+        self.ledger.leaders_log.clone()
+    }
+
+    pub fn leaders_log_for(&self, pool_id: &PoolId) -> u32 {
+        *self
+            .leaders_log()
+            .iter()
+            .find(|record| *record.0 == *pool_id)
+            .unwrap()
+            .1
+    }
+
+    // use it only for negative testing since it introduce bad state in ledger
+    pub fn increase_leader_log(&mut self, pool_id: &PoolId) {
+        self.ledger.leaders_log.increase_for(pool_id);
+    }
+
+    pub fn distribute_rewards(&mut self) -> Result<(), Error> {
+        match self.ledger.distribute_rewards(
+            &self.ledger.get_stake_distribution(),
+            &self.ledger.get_ledger_parameters(),
+            RewardsInfoParameters::default(),
+        ) {
+            Err(err) => Err(err),
+            Ok((ledger, _)) => {
+                self.ledger = ledger;
+                Ok(())
+            }
+        }
+    }
+
+    pub fn forge_empty_block(&self, stake_pool: &StakePool) -> Block {
+        self.forge_block_with_fragments(stake_pool, Vec::new())
+    }
+
+    pub fn produce_empty_block(&mut self, stake_pool: &StakePool) -> Result<(), Error> {
+        self.produce_block(stake_pool, vec![])
+    }
+
+    pub fn produce_block(
+        &mut self,
+        stake_pool: &StakePool,
+        fragments: Vec<Fragment>,
+    ) -> Result<(), Error> {
+        let block = self.forge_block_with_fragments(stake_pool, fragments);
+        self.apply_block(block)
+    }
+
+    pub fn forge_block_with_fragments(
+        &self,
+        stake_pool: &StakePool,
+        fragments: Vec<Fragment>,
+    ) -> Block {
+        GenesisPraosBlockBuilder::new()
+            .with_date(self.date().clone())
+            .with_fragments(fragments)
+            .with_chain_length(self.ledger.chain_length())
+            .with_parent_id(self.block0_hash)
+            .build(stake_pool, self.ledger.era())
+    }
+
+    pub fn forward_date(&mut self) {
+        self.ledger.date = self.ledger.date.next(self.ledger.era());
+    }
+
+    pub fn fast_forward_to(&mut self, date: BlockDate) {
+        self.set_date(date);
+    }
+
+    pub fn fire_leadership_event(
+        &mut self,
+        stake_pools: Vec<StakePool>,
+        fragments: Vec<Fragment>,
+    ) -> Result<bool, Error> {
+        let selection = LeadershipData::new(self.date().epoch, &self.ledger);
+        for stake_pool in stake_pools {
+            if let Some(_) = selection
+                .leader(
+                    &stake_pool.id(),
+                    &stake_pool.vrf().private_key(),
+                    self.ledger.date().clone(),
+                )
+                .expect("cannot calculate leader")
+            {
+                self.produce_block(&stake_pool, fragments.clone())?;
+                return Ok(true);
+            }
+        }
+        self.forward_date();
+        Ok(false)
     }
 }
 

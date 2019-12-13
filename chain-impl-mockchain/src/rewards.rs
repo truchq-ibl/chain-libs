@@ -1,4 +1,5 @@
 use crate::block::Epoch;
+use crate::stake::Stake;
 use crate::value::{Value, ValueError};
 use chain_core::mempack::{ReadBuf, ReadError};
 use std::num::{NonZeroU32, NonZeroU64};
@@ -81,45 +82,53 @@ impl TaxType {
     }
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum Limit {
+    /// the drawn value will not be limited
+    None,
+
+    /// The drawn value will be limited by the absoluted stake in the system
+    /// with a given ratio.
+    ByStakeAbsolute(Ratio),
+}
+
 /// Parameters for rewards calculation. This controls:
 ///
 /// * Rewards contributions
 /// * Treasury cuts
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Parameters {
-    /// Tax cut of the treasury which is applied straight after the reward pot
-    /// is fully known
-    pub(crate) treasury_tax: TaxType,
-
     /// This is an initial_value for the linear or halvening function.
     /// In the case of the linear function it is the value that is going to be calculated
     /// from the contribution.
-    pub(crate) initial_value: u64,
+    pub initial_value: u64,
     /// This is the ratio used by either the linear or the halvening function.
     /// The semantic and result of this is deeply linked to either.
-    pub(crate) compounding_ratio: Ratio,
+    pub compounding_ratio: Ratio,
     /// The type of compounding
-    pub(crate) compounding_type: CompoundingType,
+    pub compounding_type: CompoundingType,
     /// Number of epoch between reduction phase, cannot be 0
-    pub(crate) epoch_rate: NonZeroU32,
+    pub epoch_rate: NonZeroU32,
     /// When to start
-    pub(crate) epoch_start: Epoch,
+    pub epoch_start: Epoch,
+    /// Max Drawing limit
+    pub reward_drawing_limit_max: Limit,
+    /// Pool Capping
+    /// This doesn't really make sense
+    pub pool_participation_capping: Option<(NonZeroU32, NonZeroU32)>,
 }
 
 impl Parameters {
     pub fn zero() -> Self {
         Parameters {
-            treasury_tax: TaxType::zero(),
             initial_value: 0,
             compounding_ratio: Ratio::zero(),
             compounding_type: CompoundingType::Linear,
             epoch_rate: NonZeroU32::new(u32::max_value()).unwrap(),
             epoch_start: 0,
+            reward_drawing_limit_max: Limit::None,
+            pool_participation_capping: None,
         }
-    }
-
-    pub fn treasury_tax(&self) -> TaxType {
-        self.treasury_tax
     }
 }
 
@@ -130,11 +139,20 @@ pub struct TaxDistribution {
     pub after_tax: Value,
 }
 
+#[derive(Debug, Clone)]
+pub struct SystemInformation {
+    pub declared_stake: Stake,
+}
+
 /// Calculate the reward contribution from the parameters
 ///
 /// Note that the contribution in the system is still bounded by the remaining
 /// rewards pot, which is not taken in considering for this calculation.
-pub fn rewards_contribution_calculation(epoch: Epoch, params: &Parameters) -> Value {
+pub fn rewards_contribution_calculation(
+    epoch: Epoch,
+    params: &Parameters,
+    system_info: &SystemInformation,
+) -> Value {
     assert!(params.epoch_rate.get() != 0);
 
     if epoch < params.epoch_start {
@@ -142,7 +160,7 @@ pub fn rewards_contribution_calculation(epoch: Epoch, params: &Parameters) -> Va
     }
 
     let zone = ((epoch - params.epoch_start) / params.epoch_rate.get()) as u64;
-    match params.compounding_type {
+    let drawn = match params.compounding_type {
         CompoundingType::Linear => {
             // C - rratio * (#epoch / erate)
             let rr = &params.compounding_ratio;
@@ -150,7 +168,7 @@ pub fn rewards_contribution_calculation(epoch: Epoch, params: &Parameters) -> Va
             if params.initial_value >= reduce_by {
                 Value(params.initial_value - reduce_by)
             } else {
-                Value(params.initial_value)
+                Value::zero()
             }
         }
         CompoundingType::Halvening => {
@@ -159,7 +177,7 @@ pub fn rewards_contribution_calculation(epoch: Epoch, params: &Parameters) -> Va
             // that it allow for integer computation and that the reduce_epoch_rate
             // should prevent growth to large amount of zones
             let rr = &params.compounding_ratio;
-            const SCALE: u128 = 10 ^ 18;
+            const SCALE: u128 = 1_000_000_000_000_000_000;
 
             let mut acc = params.initial_value as u128 * SCALE;
             for _ in 0..zone {
@@ -168,6 +186,15 @@ pub fn rewards_contribution_calculation(epoch: Epoch, params: &Parameters) -> Va
             }
 
             Value((acc / SCALE) as u64)
+        }
+    };
+
+    match params.reward_drawing_limit_max {
+        Limit::None => drawn,
+        Limit::ByStakeAbsolute(ratio) => {
+            let x = (u64::from(system_info.declared_stake) as u128 * ratio.numerator as u128)
+                / ratio.denominator.get() as u128;
+            std::cmp::min(drawn, Value(x as u64))
         }
     }
 }
@@ -196,7 +223,7 @@ pub fn tax_cut(v: Value, tax_type: &TaxType) -> Result<TaxDistribution, ValueErr
         let rr = tax_type.ratio;
         let olimit = tax_type.max_limit;
 
-        const SCALE: u128 = 10 ^ 9;
+        const SCALE: u128 = 1_000_000_000;
         let out = ((((left.0 as u128 * SCALE) * rr.numerator as u128)
             / rr.denominator.get() as u128)
             / SCALE) as u64;
@@ -247,6 +274,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn rewards_contribution_calculation_epoch_start_smaller_than_epoch() {
+        let mut params = Parameters::zero();
+        params.epoch_start = 1;
+        let epoch = 0;
+        let system_info = SystemInformation {
+            declared_stake: Stake::from_value(Value(100)),
+        };
+        assert_eq!(
+            rewards_contribution_calculation(epoch, &params, &system_info),
+            Value::zero()
+        );
+    }
+
     impl Arbitrary for TaxType {
         fn arbitrary<G: Gen>(gen: &mut G) -> Self {
             let fixed = Arbitrary::arbitrary(gen);
@@ -261,6 +302,49 @@ mod tests {
                     denominator: NonZeroU64::new(denominator).unwrap(),
                 },
                 max_limit,
+            }
+        }
+    }
+
+    impl Arbitrary for Limit {
+        fn arbitrary<G: Gen>(g: &mut G) -> Self {
+            if bool::arbitrary(g) {
+                Limit::None
+            } else {
+                Limit::ByStakeAbsolute(Ratio::arbitrary(g))
+            }
+        }
+    }
+
+    impl Arbitrary for Parameters {
+        fn arbitrary<G: Gen>(g: &mut G) -> Self {
+            let epoch_rate = {
+                let mut number = u32::arbitrary(g);
+                if number == 0 {
+                    number = number + 1;
+                }
+                NonZeroU32::new(number).unwrap()
+            };
+
+            Parameters {
+                initial_value: u64::arbitrary(g),
+                compounding_ratio: Ratio::arbitrary(g),
+                compounding_type: CompoundingType::arbitrary(g),
+                epoch_rate: epoch_rate,
+                epoch_start: Arbitrary::arbitrary(g),
+                reward_drawing_limit_max: Limit::arbitrary(g),
+                pool_participation_capping: None,
+            }
+        }
+    }
+
+    impl Arbitrary for CompoundingType {
+        fn arbitrary<G: Gen>(g: &mut G) -> Self {
+            let option: u8 = u8::arbitrary(g) % 2;
+            match option {
+                0 => CompoundingType::Linear,
+                2 => CompoundingType::Halvening,
+                _ => unreachable!(),
             }
         }
     }
