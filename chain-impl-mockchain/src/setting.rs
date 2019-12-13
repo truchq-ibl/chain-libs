@@ -1,7 +1,7 @@
 //! define the Blockchain settings
 //!
 
-use crate::fragment::config::ConfigParams;
+use crate::fragment::{config::ConfigParams, BlockContentSize};
 use crate::leadership::genesis::ActiveSlotsCoeff;
 use crate::milli::Milli;
 use crate::update::Error;
@@ -13,6 +13,7 @@ use crate::{
     rewards,
 };
 use std::convert::TryFrom;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -23,8 +24,7 @@ pub struct Settings {
     pub slot_duration: u8,
     pub epoch_stability_depth: u32,
     pub active_slots_coeff: ActiveSlotsCoeff,
-    pub max_number_of_transactions_per_block: u32,
-    pub bft_slots_ratio: Milli, // aka "d" parameter
+    pub block_content_max_size: BlockContentSize,
     pub bft_leaders: Arc<Vec<bft::LeaderId>>,
     pub linear_fees: Arc<LinearFee>,
     /// The number of epochs that a proposal remains valid. To be
@@ -34,6 +34,25 @@ pub struct Settings {
     pub proposal_expiration: u32,
     pub reward_params: Option<RewardParams>,
     pub treasury_params: Option<rewards::TaxType>,
+    pub fees_goes_to: FeesGoesTo,
+    pub rewards_limit: rewards::Limit,
+    pub pool_participation_capping: Option<(NonZeroU32, NonZeroU32)>,
+}
+
+/// Fees nSettings
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FeesGoesTo {
+    /// Move the fees to the rewards; this is the common mode of blockchain operation.
+    Rewards,
+    /// Move the fees directly to treasury. this is not a recommended settings, as
+    /// it fundamentally change the dynamic of the blockchain operation.
+    Treasury,
+}
+
+impl Default for FeesGoesTo {
+    fn default() -> Self {
+        FeesGoesTo::Rewards
+    }
 }
 
 pub const SLOTS_PERCENTAGE_RANGE: u8 = 100;
@@ -47,13 +66,15 @@ impl Settings {
             slot_duration: 10,         // 10 sec
             epoch_stability_depth: 10, // num of block
             active_slots_coeff: ActiveSlotsCoeff::try_from(Milli::HALF).unwrap(),
-            max_number_of_transactions_per_block: 100,
-            bft_slots_ratio: Milli::ONE,
+            block_content_max_size: 102_400,
             bft_leaders: Arc::new(Vec::new()),
             linear_fees: Arc::new(LinearFee::new(0, 0, 0)),
             proposal_expiration: 100,
             reward_params: None,
             treasury_params: None,
+            fees_goes_to: FeesGoesTo::Rewards,
+            rewards_limit: rewards::Limit::None,
+            pool_participation_capping: None,
         }
     }
 
@@ -89,14 +110,8 @@ impl Settings {
                 ConfigParam::ConsensusGenesisPraosActiveSlotsCoeff(d) => {
                     new_state.active_slots_coeff = ActiveSlotsCoeff::try_from(*d)?;
                 }
-                ConfigParam::MaxNumberOfTransactionsPerBlock(d) => {
-                    new_state.max_number_of_transactions_per_block = *d;
-                }
-                ConfigParam::BftSlotsRatio(d) => {
-                    if *d > Milli::ONE {
-                        return Err(Error::BadBftSlotsRatio(*d));
-                    }
-                    new_state.bft_slots_ratio = *d;
+                ConfigParam::BlockContentMaxSize(d) => {
+                    new_state.block_content_max_size = *d;
                 }
                 ConfigParam::AddBftLeader(d) => {
                     // FIXME: O(n)
@@ -129,6 +144,20 @@ impl Settings {
                 ConfigParam::PerCertificateFees(pcf) => {
                     per_certificate_fees = Some(pcf);
                 }
+                ConfigParam::FeesInTreasury(value) => {
+                    new_state.fees_goes_to = if *value {
+                        FeesGoesTo::Treasury
+                    } else {
+                        FeesGoesTo::Rewards
+                    };
+                }
+                ConfigParam::RewardLimitNone => new_state.rewards_limit = rewards::Limit::None,
+                ConfigParam::RewardLimitByAbsoluteStake(ratio) => {
+                    new_state.rewards_limit = rewards::Limit::ByStakeAbsolute(ratio.clone())
+                }
+                ConfigParam::PoolRewardParticipationCapping(r) => {
+                    new_state.pool_participation_capping = Some(r.clone())
+                }
             }
         }
 
@@ -151,10 +180,9 @@ impl Settings {
         params.push(ConfigParam::ConsensusGenesisPraosActiveSlotsCoeff(
             self.active_slots_coeff.into(),
         ));
-        params.push(ConfigParam::MaxNumberOfTransactionsPerBlock(
-            self.max_number_of_transactions_per_block,
+        params.push(ConfigParam::BlockContentMaxSize(
+            self.block_content_max_size,
         ));
-        params.push(ConfigParam::BftSlotsRatio(self.bft_slots_ratio));
         for bft_leader in self.bft_leaders.iter() {
             params.push(ConfigParam::AddBftLeader(bft_leader.clone()));
         }
@@ -176,7 +204,10 @@ impl Settings {
     }
 
     pub fn to_reward_params(&self) -> rewards::Parameters {
-        let mut p = match self.reward_params {
+        let reward_drawing_limit_max = self.rewards_limit.clone();
+        let pool_participation_capping = self.pool_participation_capping.clone();
+
+        match self.reward_params {
             None => rewards::Parameters::zero(),
             Some(RewardParams::Halving {
                 constant,
@@ -184,12 +215,13 @@ impl Settings {
                 epoch_start,
                 epoch_rate,
             }) => rewards::Parameters {
-                treasury_tax: rewards::TaxType::zero(),
                 initial_value: constant,
                 compounding_ratio: ratio,
                 compounding_type: rewards::CompoundingType::Halvening,
                 epoch_start,
                 epoch_rate,
+                reward_drawing_limit_max,
+                pool_participation_capping,
             },
             Some(RewardParams::Linear {
                 constant,
@@ -197,25 +229,32 @@ impl Settings {
                 epoch_start,
                 epoch_rate,
             }) => rewards::Parameters {
-                treasury_tax: rewards::TaxType::zero(),
                 initial_value: constant,
                 compounding_ratio: ratio,
                 compounding_type: rewards::CompoundingType::Linear,
                 epoch_start,
                 epoch_rate,
+                reward_drawing_limit_max,
+                pool_participation_capping,
             },
-        };
-        p.treasury_tax = self
-            .treasury_params
-            .unwrap_or_else(|| rewards::TaxType::zero());
-        p
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Settings;
+    use super::{FeesGoesTo, Settings};
     use quickcheck::{Arbitrary, Gen};
+
+    impl Arbitrary for FeesGoesTo {
+        fn arbitrary<G: Gen>(g: &mut G) -> Self {
+            if Arbitrary::arbitrary(g) {
+                FeesGoesTo::Treasury
+            } else {
+                FeesGoesTo::Rewards
+            }
+        }
+    }
 
     impl Arbitrary for Settings {
         fn arbitrary<G: Gen>(_: &mut G) -> Self {
