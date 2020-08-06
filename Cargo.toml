@@ -14,5 +14,5 @@ members = [
     "network-grpc",
     "sparse-array",
     "typed-bytes",
-    "cardano-c",
+    "cardano",
 ]
